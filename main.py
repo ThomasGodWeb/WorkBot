@@ -70,8 +70,7 @@ def get_admin_keyboard():
     builder.button(text="➖ Удалить доступ", callback_data="action_remove_access")
     builder.button(text="🗑️ Удалить комнату", callback_data="action_delete_room")
     builder.button(text="👑 Управление ролями", callback_data="action_manage_roles")
-    builder.button(text="🚪 Выйти из комнаты", callback_data="action_exit_room")
-    builder.adjust(2, 2, 2, 2, 2, 1)
+    builder.adjust(2, 2, 2, 2, 2)
     return builder.as_markup()
 
 
@@ -80,7 +79,7 @@ def get_user_keyboard():
     builder = InlineKeyboardBuilder()
     builder.button(text="📂 Мои комнаты", callback_data="action_my_rooms")
     builder.button(text="⭐ Отзывы", callback_data="action_reviews")
-    builder.button(text="🚪 Выйти из комнаты", callback_data="action_exit_room")
+    builder.button(text="✍️ Оставить отзыв", callback_data="action_add_review")
     builder.button(text="🔄 Обновить меню", callback_data="action_refresh")
     builder.adjust(2, 1, 1)
     return builder.as_markup()
@@ -103,7 +102,6 @@ def get_reply_admin_keyboard():
     builder.button(text="➖ Удалить доступ")
     builder.button(text="🗑️ Удалить комнату")
     builder.button(text="👑 Управление ролями")
-    builder.button(text="🚪 Выйти из комнаты")
     builder.button(text="🔙 Главное меню")
     builder.adjust(2, 2, 2, 2, 1)
     return builder.as_markup(resize_keyboard=True)
@@ -113,7 +111,6 @@ def get_reply_user_keyboard():
     """Создать Reply клавиатуру для обычного пользователя"""
     builder = ReplyKeyboardBuilder()
     builder.button(text="📂 Мои комнаты")
-    builder.button(text="🚪 Выйти из комнаты")
     builder.button(text="🔙 Главное меню")
     builder.adjust(2, 1)
     return builder.as_markup(resize_keyboard=True)
@@ -1370,6 +1367,61 @@ async def process_toggle_notification(callback: CallbackQuery):
 
 
 # Обработчики для отзывов
+@dp.callback_query(lambda c: c.data == "action_add_review")
+async def process_add_review_button(callback: CallbackQuery):
+    """Обработка кнопки 'Оставить отзыв'"""
+    user_id = callback.from_user.id
+    
+    # Получаем закрытые заказы клиента
+    closed_orders = await db.get_customer_closed_orders(user_id)
+    
+    if not closed_orders:
+        await callback.message.edit_text(
+            "✍️ <b>Оставить отзыв</b>\n\n"
+            "📭 У вас пока нет закрытых заказов.\n\n"
+            "💡 Отзывы можно оставлять только для закрытых заказов.",
+            parse_mode="HTML",
+            reply_markup=get_back_to_menu_keyboard(False)
+        )
+        await callback.answer()
+        return
+    
+    # Фильтруем заказы, для которых еще нет отзыва
+    orders_without_review = [order for order in closed_orders if not order['has_review']]
+    
+    if not orders_without_review:
+        await callback.message.edit_text(
+            "✍️ <b>Оставить отзыв</b>\n\n"
+            "✅ Вы уже оставили отзывы для всех ваших закрытых заказов.\n\n"
+            "💡 Спасибо за вашу обратную связь!",
+            parse_mode="HTML",
+            reply_markup=get_back_to_menu_keyboard(False)
+        )
+        await callback.answer()
+        return
+    
+    # Показываем список заказов для отзыва
+    text = "✍️ <b>Оставить отзыв</b>\n\n"
+    text += "📋 <b>Выберите заказ для отзыва:</b>\n\n"
+    text += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    builder = InlineKeyboardBuilder()
+    for idx, order in enumerate(orders_without_review[:10], 1):
+        text += f"<b>{idx}. {order['room_name']}</b>\n"
+        text += f"📅 Закрыт: {order['closed_at']}\n\n"
+        
+        builder.button(
+            text=f"⭐ {order['room_name'][:30]}",
+            callback_data=f"add_review_{order['room_id']}"
+        )
+    
+    builder.button(text="🔙 Главное меню", callback_data="action_menu")
+    builder.adjust(1)
+    
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=builder.as_markup())
+    await callback.answer()
+
+
 @dp.callback_query(lambda c: c.data == "action_reviews")
 async def process_reviews_button(callback: CallbackQuery):
     """Обработка кнопки отзывов"""
@@ -1414,6 +1466,52 @@ async def process_reviews_button(callback: CallbackQuery):
     builder.adjust(1)
     
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data.startswith("add_review_") and 
+                   not c.data.startswith("action_add_review") and
+                   len(c.data.split("_")) == 3)
+async def process_add_review_select(callback: CallbackQuery):
+    """Обработка выбора заказа для отзыва"""
+    room_id = int(callback.data.split("_")[2])
+    
+    # Проверяем, является ли пользователь клиентом этого заказа
+    closed_orders = await db.get_customer_closed_orders(callback.from_user.id)
+    order = next((o for o in closed_orders if o['room_id'] == room_id), None)
+    
+    if not order:
+        await callback.answer("🚫 У вас нет доступа к этому заказу.", show_alert=True)
+        return
+    
+    if order['has_review']:
+        await callback.answer("⚠️ Вы уже оставили отзыв для этого заказа.", show_alert=True)
+        return
+    
+    # Получаем информацию о комнате
+    room = await db.get_room(room_id)
+    if not room:
+        # Если комнаты нет, используем данные из истории
+        history = await db.get_order_history()
+        order_history = next((h for h in history if h['room_id'] == room_id), None)
+        if not order_history:
+            await callback.answer("❌ Заказ не найден.", show_alert=True)
+            return
+        room_name = order_history['room_name']
+    else:
+        room_name = room['room_name']
+    
+    # Устанавливаем состояние для добавления отзыва
+    user_action_state[callback.from_user.id] = f'add_review_{room_id}'
+    
+    await callback.message.edit_text(
+        "⭐ <b>Оставить отзыв</b>\n\n"
+        f"🏠 Заказ: <b>{room_name}</b>\n\n"
+        "💬 Поделитесь вашим мнением о работе:\n\n"
+        "❌ Для отмены используйте <code>/cancel</code>",
+        parse_mode="HTML",
+        reply_markup=get_back_to_menu_keyboard(False)
+    )
     await callback.answer()
 
 
@@ -1646,8 +1744,14 @@ async def process_room_close(callback: CallbackQuery):
     
     await callback.answer("✅ Заказ закрыт и перемещен в историю", show_alert=True)
     
+    # Удаляем из активных комнат всех пользователей этой комнаты
+    users_to_remove = [uid for uid, rid in user_active_rooms.items() if rid == room_id]
+    for uid in users_to_remove:
+        del user_active_rooms[uid]
+    
     # Уведомляем всех участников
     members = await db.get_room_members(room_id)
+    customer_id = None
     for member in members:
         try:
             await bot.send_message(
@@ -1656,6 +1760,29 @@ async def process_room_close(callback: CallbackQuery):
                 f"🏠 Комната: <b>{room['room_name']}</b>\n\n"
                 f"💡 Заказ был закрыт администратором и перемещен в историю.",
                 parse_mode="HTML"
+            )
+            # Находим клиента
+            if member['access_type'] == 'customer':
+                customer_id = member['user_id']
+        except:
+            pass
+    
+    # Предлагаем клиенту оставить отзыв
+    if customer_id:
+        try:
+            builder = InlineKeyboardBuilder()
+            builder.button(text="⭐ Оставить отзыв", callback_data=f"add_review_{room_id}")
+            builder.button(text="🔙 Главное меню", callback_data="action_menu")
+            builder.adjust(1, 1)
+            
+            await bot.send_message(
+                customer_id,
+                f"✅ <b>Заказ закрыт</b>\n\n"
+                f"🏠 Комната: <b>{room['room_name']}</b>\n\n"
+                f"⭐ <b>Оставить отзыв</b>\n\n"
+                f"💬 Поделитесь вашим мнением о работе или нажмите кнопку ниже:",
+                parse_mode="HTML",
+                reply_markup=builder.as_markup()
             )
         except:
             pass
@@ -1684,12 +1811,41 @@ async def process_room_close_confirm(callback: CallbackQuery):
         await callback.answer("🚫 Только клиент может закрыть заказ.", show_alert=True)
         return
     
+    # Проверяем, не закрыта ли комната уже
+    try:
+        from config import DATABASE_PATH
+        async with aiosqlite.connect(DATABASE_PATH) as conn:
+            async with conn.execute('SELECT COUNT(*) FROM order_history WHERE room_id = ?', (room_id,)) as cursor:
+                result = await cursor.fetchone()
+                if result and result[0] > 0:
+                    await callback.answer("⚠️ Этот заказ уже закрыт.", show_alert=True)
+                    return
+    except:
+        pass
+    
     # Перемещаем в историю
     await db.add_to_order_history(room_id, callback.from_user.id)
     
-    # Удаляем из активных комнат
-    if callback.from_user.id in user_active_rooms:
-        del user_active_rooms[callback.from_user.id]
+    # Удаляем из активных комнат всех пользователей этой комнаты
+    users_to_remove = [uid for uid, rid in user_active_rooms.items() if rid == room_id]
+    for uid in users_to_remove:
+        del user_active_rooms[uid]
+    
+    # Уведомляем всех участников
+    members = await db.get_room_members(room_id)
+    customer_name = callback.from_user.full_name or callback.from_user.username or f"ID: {callback.from_user.id}"
+    for member in members:
+        try:
+            await bot.send_message(
+                member['user_id'],
+                f"✅ <b>Заказ закрыт</b>\n\n"
+                f"🏠 Комната: <b>{room['room_name']}</b>\n\n"
+                f"👤 Закрыл клиент: <b>{customer_name}</b>\n\n"
+                f"💡 Заказ был закрыт клиентом и перемещен в историю.",
+                parse_mode="HTML"
+            )
+        except:
+            pass
     
     # Предлагаем оставить отзыв
     user_action_state[callback.from_user.id] = f'add_review_{room_id}'
@@ -1703,7 +1859,7 @@ async def process_room_close_confirm(callback: CallbackQuery):
         parse_mode="HTML",
         reply_markup=get_back_to_menu_keyboard(False)
     )
-    await callback.answer()
+    await callback.answer("✅ Заказ закрыт!")
 
 
 @dp.callback_query(lambda c: c.data == "action_refresh")
@@ -1811,16 +1967,8 @@ async def process_room_selection(callback: CallbackQuery):
             text = f"✅ <b>Вы вошли в комнату!</b>\n\n"
             text += f"🏠 <b>Комната:</b> {room['room_name']}\n"
             text += f"🆔 <b>ID:</b> <code>{room_id}</code>\n\n"
-            text += f"👥 <b>Участников:</b> {len(members)}\n\n"
             
-            if members:
-                text += "📋 <b>Список участников:</b>\n"
-                for member in members:
-                    role_emoji = "👤" if member['access_type'] == 'customer' else "👨‍💻"
-                    username = f"@{member['username']}" if member['username'] else f"ID: {member['user_id']}"
-                    text += f"{role_emoji} {username}\n"
-                text += "\n"
-            
+            # Не показываем список участников для клиентов, только для администраторов
             text += f"💬 Теперь все ваши сообщения будут автоматически отправляться в эту комнату.\n\n"
             text += f"📤 Отправляйте текстовые сообщения, фото, видео, документы - все будет переслано участникам."
             
@@ -1831,7 +1979,7 @@ async def process_room_selection(callback: CallbackQuery):
             is_customer = user_access and user_access.get('access_type') == 'customer'
             
             if is_customer:
-                builder.button(text="✅ Заказ закрыт", callback_data=f"room_close_confirm_{room_id}")
+                builder.button(text="✅ Закрыть заказ", callback_data=f"room_close_confirm_{room_id}")
             
             builder.button(text="🔙 Главное меню", callback_data="action_menu")
             builder.button(text="🚪 Выйти из комнаты", callback_data="action_exit_room")

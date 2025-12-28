@@ -854,4 +854,25 @@ class Database:
                     return row[0] if row else 'active'
             except:
                 return 'active'  # Если поле status не существует
+    
+    async def get_customer_closed_orders(self, customer_id: int) -> List[Dict]:
+        """Получить закрытые заказы клиента (где он был клиентом)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Получаем закрытые заказы, где пользователь был клиентом
+            async with db.execute('''
+                SELECT DISTINCT h.history_id, h.room_id, h.room_name, h.closed_at,
+                       CASE WHEN r.review_id IS NOT NULL THEN 1 ELSE 0 END as has_review
+                FROM order_history h
+                LEFT JOIN reviews r ON h.room_id = r.room_id AND r.user_id = ?
+                WHERE h.customer_id = ?
+                ORDER BY h.closed_at DESC
+            ''', (customer_id, customer_id)) as cursor:
+                rows = await cursor.fetchall()
+                return [{
+                    'history_id': row[0],
+                    'room_id': row[1],
+                    'room_name': row[2],
+                    'closed_at': row[3],
+                    'has_review': row[4]
+                } for row in rows]
 
