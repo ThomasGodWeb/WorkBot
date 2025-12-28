@@ -801,6 +801,9 @@ async def process_role_set(callback: CallbackQuery):
     # Если роль изменена на "customer", автоматически добавляем в базу заказчиков
     if new_role == 'customer':
         await db.add_or_update_customer(user_id)
+    # Если роль изменена на админа или разработчика, удаляем из базы заказчиков
+    elif new_role in ['admin', 'developer']:
+        await db.remove_customer(user_id)
     
     role_names = {
         'admin': 'Администратор',
@@ -1425,16 +1428,29 @@ async def process_add_review_button(callback: CallbackQuery):
 @dp.callback_query(lambda c: c.data == "action_reviews")
 async def process_reviews_button(callback: CallbackQuery):
     """Обработка кнопки отзывов"""
+    user_id = callback.from_user.id
     reviews = await db.get_all_reviews()
+    
+    # Проверяем, есть ли у пользователя закрытые заказы для отзыва
+    closed_orders = await db.get_customer_closed_orders(user_id)
+    orders_without_review = [order for order in closed_orders if not order['has_review']] if closed_orders else []
+    can_write_review = len(orders_without_review) > 0
     
     if not reviews:
         text = (
             "⭐ <b>Отзывы</b>\n\n"
             "📭 Пока нет отзывов.\n\n"
-            "💡 Клиенты могут оставлять отзывы из своих комнат после закрытия заказа."
         )
+        if can_write_review:
+            text += "💡 Вы можете оставить отзыв о закрытых заказах."
+        else:
+            text += "💡 Клиенты могут оставлять отзывы из своих комнат после закрытия заказа."
+        
         builder = InlineKeyboardBuilder()
+        if can_write_review:
+            builder.button(text="✍️ Написать отзыв", callback_data="action_add_review")
         builder.button(text="🔙 Главное меню", callback_data="action_menu")
+        builder.adjust(1) if can_write_review else builder.adjust(1)
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=builder.as_markup())
         await callback.answer()
         return
@@ -1462,6 +1478,8 @@ async def process_reviews_button(callback: CallbackQuery):
             callback_data=f"review_{review['review_id']}"
         )
     
+    if can_write_review:
+        builder.button(text="✍️ Написать отзыв", callback_data="action_add_review")
     builder.button(text="🔙 Главное меню", callback_data="action_menu")
     builder.adjust(1)
     
@@ -1721,7 +1739,8 @@ async def process_order_history_delete(callback: CallbackQuery):
 
 
 # Обработчики для закрытия заказа
-@dp.callback_query(lambda c: c.data.startswith("room_close_"))
+@dp.callback_query(lambda c: c.data.startswith("room_close_") and 
+                   not c.data.startswith("room_close_confirm_"))
 async def process_room_close(callback: CallbackQuery):
     """Обработка закрытия заказа администратором"""
     if not await check_is_admin(callback.from_user.id):
@@ -3603,6 +3622,13 @@ async def process_message(message: Message):
                 )
         else:
             # Обычный пользователь пишет в чат
+            # Сначала убеждаемся, что пользователь добавлен в базу
+            username = message.from_user.username
+            full_name = message.from_user.full_name
+            is_user_admin = await check_is_admin(user_id)
+            role = 'admin' if is_user_admin else 'user'
+            await db.add_user(user_id, username, full_name, role)
+            
             # Создаем или получаем чат
             chat_id = await db.get_or_create_chat(user_id)
             
@@ -3615,9 +3641,10 @@ async def process_message(message: Message):
             if message_text:
                 await db.save_chat_message(chat_id, user_id, message_text, True)
             
-            # Проверяем роль пользователя и добавляем в базу заказчиков только если роль customer
+            # Добавляем в базу заказчиков всех, кто пишет, кроме админов и разработчиков
             user_role = await db.get_user_role(user_id)
-            if user_role == 'customer':
+            # Добавляем если не админ и не разработчик
+            if not is_user_admin and user_role != 'developer':
                 await db.add_or_update_customer(user_id)
             
             # Отправляем сообщение всем администраторам

@@ -522,6 +522,12 @@ class Database:
             ''', (notes, user_id))
             await db.commit()
     
+    async def remove_customer(self, user_id: int):
+        """Удалить пользователя из базы заказчиков"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('DELETE FROM customers WHERE user_id = ?', (user_id,))
+            await db.commit()
+    
     async def get_customer_info(self, user_id: int) -> Optional[Dict]:
         """Получить информацию о заказчике"""
         async with aiosqlite.connect(self.db_path) as db:
@@ -542,55 +548,33 @@ class Database:
                 return None
     
     async def get_all_customers(self) -> List[Dict]:
-        """Получить всех заказчиков с пометками (всех пользователей с ролью customer)"""
+        """Получить всех заказчиков с пометками (исключая админов и разработчиков)"""
         async with aiosqlite.connect(self.db_path) as db:
-            # Получаем всех пользователей с ролью customer, включая тех, кто еще не в таблице customers
+            # Получаем всех пользователей из таблицы customers, исключая админов и разработчиков
             async with db.execute('''
-                SELECT u.user_id, u.username, u.full_name, u.created_at,
+                SELECT u.user_id, u.username, u.full_name, u.created_at, u.role,
                        c.customer_id, c.notes, c.status, c.created_at as customer_created_at, c.updated_at
-                FROM users u
-                LEFT JOIN customers c ON u.user_id = c.user_id
-                WHERE u.role = 'customer'
+                FROM customers c
+                JOIN users u ON c.user_id = u.user_id
+                WHERE u.role != 'admin' AND u.role != 'developer'
                 ORDER BY COALESCE(c.updated_at, u.created_at) DESC
             ''') as cursor:
                 rows = await cursor.fetchall()
                 result = []
                 for row in rows:
-                    # Если пользователя нет в таблице customers, добавляем его
-                    if row[4] is None:  # customer_id is None
-                        # Добавляем пользователя в таблицу customers
-                        await db.execute('''
-                            INSERT INTO customers (user_id, notes, updated_at)
-                            VALUES (?, NULL, CURRENT_TIMESTAMP)
-                        ''', (row[0],))
-                        await db.commit()
-                        # Получаем добавленную запись
-                        async with db.execute('''
-                            SELECT customer_id, notes, status, created_at, updated_at
-                            FROM customers WHERE user_id = ?
-                        ''', (row[0],)) as cust_cursor:
-                            cust_row = await cust_cursor.fetchone()
-                            result.append({
-                                'customer_id': cust_row[0] if cust_row else None,
-                                'user_id': row[0],
-                                'notes': cust_row[1] if cust_row else None,
-                                'status': cust_row[2] if cust_row else 'new',
-                                'created_at': cust_row[3] if cust_row else row[3],
-                                'updated_at': cust_row[4] if cust_row else row[3],
-                                'username': row[1],
-                                'full_name': row[2]
-                            })
-                    else:
-                        result.append({
-                            'customer_id': row[4],
-                            'user_id': row[0],
-                            'notes': row[5],
-                            'status': row[6],
-                            'created_at': row[7] if row[7] else row[3],
-                            'updated_at': row[8] if row[8] else row[3],
-                            'username': row[1],
-                            'full_name': row[2]
-                        })
+                    # row[0] = user_id, row[1] = username, row[2] = full_name, row[3] = created_at, row[4] = role
+                    # row[5] = customer_id, row[6] = notes, row[7] = status, row[8] = customer_created_at, row[9] = updated_at
+                    result.append({
+                        'customer_id': row[5],
+                        'user_id': row[0],
+                        'notes': row[6],
+                        'status': row[7] if row[7] else 'new',
+                        'created_at': row[8] if row[8] else row[3],
+                        'updated_at': row[9] if row[9] else row[3],
+                        'username': row[1],
+                        'full_name': row[2],
+                        'role': row[4]
+                    })
                 return result
     
     # Методы для работы с уведомлениями
