@@ -1869,14 +1869,18 @@ async def process_room_close_confirm(callback: CallbackQuery):
     # Предлагаем оставить отзыв
     user_action_state[callback.from_user.id] = f'add_review_{room_id}'
     
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⭐ Оставить отзыв", callback_data=f"add_review_{room_id}")
+    builder.button(text="🔙 Главное меню", callback_data="action_menu")
+    builder.adjust(1, 1)
+    
     await callback.message.edit_text(
         "✅ <b>Заказ закрыт!</b>\n\n"
         f"🏠 Комната: <b>{room['room_name']}</b>\n\n"
         "⭐ <b>Оставить отзыв</b>\n\n"
-        "💬 Поделитесь вашим мнением о работе:\n\n"
-        "❌ Для отмены используйте <code>/cancel</code>",
+        "💬 Поделитесь вашим мнением о работе или нажмите кнопку ниже:",
         parse_mode="HTML",
-        reply_markup=get_back_to_menu_keyboard(False)
+        reply_markup=builder.as_markup()
     )
     await callback.answer("✅ Заказ закрыт!")
 
@@ -2861,6 +2865,47 @@ async def process_message(message: Message):
                 del user_action_state[user_id]
             return
     
+    # Обработка добавления отзыва (для всех пользователей, включая клиентов)
+    action = user_action_state.get(user_id)
+    if action and action.startswith('add_review_'):
+        try:
+            room_id = int(action.split("_")[2])
+            review_text = text.strip()
+            
+            if not review_text:
+                await message.answer(
+                    "❌ <b>Ошибка</b>\n\n"
+                    "📝 Отзыв не может быть пустым.\n\n"
+                    "💬 Пожалуйста, отправьте ваш отзыв.",
+                    parse_mode="HTML"
+                )
+                return
+            
+            # Добавляем отзыв
+            review_id = await db.add_review(user_id, room_id, review_text)
+            
+            await message.answer(
+                "✅ <b>Отзыв добавлен!</b>\n\n"
+                f"⭐ Ваш отзыв успешно опубликован.\n\n"
+                f"💡 Спасибо за вашу обратную связь!",
+                parse_mode="HTML",
+                reply_markup=get_back_to_menu_keyboard(False)
+            )
+            
+            if user_id in user_action_state:
+                del user_action_state[user_id]
+            return
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении отзыва: {e}")
+            await message.answer(
+                f"❌ <b>Ошибка</b>\n\n"
+                f"Не удалось добавить отзыв: {str(e)}",
+                parse_mode="HTML"
+            )
+            if user_id in user_action_state:
+                del user_action_state[user_id]
+            return
+    
     # Обработка команд администратора
     if await check_is_admin(user_id) or is_admin(user_id):
         action = user_action_state.get(user_id)
@@ -3038,46 +3083,7 @@ async def process_message(message: Message):
                     del user_action_state[user_id]
                 return
         
-        # Обработка добавления отзыва
-        if action and action.startswith('add_review_'):
-            try:
-                room_id = int(action.split("_")[2])
-                review_text = text.strip()
-                
-                if not review_text:
-                    await message.answer(
-                        "❌ <b>Ошибка</b>\n\n"
-                        "📝 Отзыв не может быть пустым.\n\n"
-                        "💬 Пожалуйста, отправьте ваш отзыв.",
-                        parse_mode="HTML"
-                    )
-                    return
-                
-                # Добавляем отзыв
-                review_id = await db.add_review(user_id, room_id, review_text)
-                
-                await message.answer(
-                    "✅ <b>Отзыв добавлен!</b>\n\n"
-                    f"⭐ Ваш отзыв успешно опубликован.\n\n"
-                    f"💡 Спасибо за вашу обратную связь!",
-                    parse_mode="HTML",
-                    reply_markup=get_back_to_menu_keyboard(False)
-                )
-                
-                if user_id in user_action_state:
-                    del user_action_state[user_id]
-                return
-            except Exception as e:
-                await message.answer(
-                    f"❌ <b>Ошибка</b>\n\n"
-                    f"Не удалось добавить отзыв: {str(e)}",
-                    parse_mode="HTML"
-                )
-                if user_id in user_action_state:
-                    del user_action_state[user_id]
-                return
-        
-        # Обработка ответа на отзыв
+        # Обработка ответа на отзыв (только для администраторов)
         if action and action.startswith('review_reply_'):
             try:
                 review_id = int(action.split("_")[2])
